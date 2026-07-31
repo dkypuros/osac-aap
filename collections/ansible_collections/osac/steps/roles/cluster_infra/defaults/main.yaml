@@ -1,0 +1,19 @@
+---
+# Which fabric implementation attaches allocated hosts to the cluster network.
+#
+#   esi     -- the upstream assumption: an OpenStack ESI cloud provides L2
+#              networks, addressed through openstack.cloud modules and a
+#              clouds.yaml. This is the default, so upstream deployments are
+#              unaffected by this variable existing.
+#   manual  -- no fabric to drive: the hosts' networking is pre-provisioned
+#              (static lab wiring, an external controller such as NICo/HBN, or
+#              emulated hardware whose "network" is a bridge that already
+#              exists). Network create/attach steps become explicit no-ops;
+#              everything else -- pool creation, instance allocation, agent
+#              labelling -- runs unchanged.
+#
+# Without this switch, environments with no OpenStack died at the first ESI
+# call with a keystoneauth MissingRequiredOptions traceback, 54 tasks into an
+# otherwise healthy provision. Sourced from the environment so a container
+# group can set it per-execution-environment rather than per-order.
+cluster_infra_network_class: "{{ lookup('env', 'OSAC_NETWORK_CLASS') | default('esi', true) }}"

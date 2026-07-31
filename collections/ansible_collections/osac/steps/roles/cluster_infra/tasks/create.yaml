@@ -34,6 +34,7 @@
     baremetalpool_uid: "{{ baremetalpool_response.result.metadata.uid }}"
 
 - name: Create cluster network
+  when: cluster_infra_network_class == 'esi'
   ansible.builtin.include_role:
     name: osac.esi.network
   vars:
@@ -43,6 +44,16 @@
       instance: "{{ cluster_order.metadata.namespace }}"
       clusterorder: "{{ cluster_infra_name }}"
       purpose: "o-sac"
+
+- name: Cluster network is pre-provisioned (network class '{{ cluster_infra_network_class }}')
+  when: cluster_infra_network_class != 'esi'
+  ansible.builtin.debug:
+    msg: >-
+      Skipping fabric network creation: cluster_infra_network_class is
+      '{{ cluster_infra_network_class }}', so host networking is expected to be
+      provided outside this playbook (pre-wired lab fabric, NICo/HBN, or
+      emulated hosts). The logical network name below is still set for
+      bookkeeping.
 
 - name: Set cluster_infra_network_name
   ansible.builtin.set_fact:
@@ -148,6 +159,7 @@
     msg: "Agents to label: {{ agents_to_attach | map(attribute='metadata.name') | list }}"
 
 - name: Attach new agents's hosts to cluster network
+  when: cluster_infra_network_class == 'esi'
   ansible.builtin.include_role:
     name: osac.esi.l2
     tasks_from: set_networks_for_node
@@ -158,6 +170,11 @@
   loop: "{{ allocated_host_ids }}"
   loop_control:
     label: "Attach host {{ item }}"
+
+- name: Host attachment is pre-provisioned (network class '{{ cluster_infra_network_class }}')
+  when: cluster_infra_network_class != 'esi'
+  ansible.builtin.debug:
+    msg: "Skipping ESI L2 attach for hosts {{ allocated_host_ids }} -- fabric is external."
 
 - name: Label selected agents with cluster order
   kubernetes.core.k8s_json_patch:
