@@ -48,34 +48,63 @@
         lease_holder: "{{ cluster_order_holder_id }}"
         lease_name: "cluster-{{ cluster_order_name }}-lock"
 
-    - name: Add infrastructure finalizer
-      ansible.builtin.include_role:
-        name: osac.service.finalizer
-      vars:
-        finalizer_state: present
-        finalizer_name: "{{ cluster_order_infrastructure_finalizer }}"
-        finalizer_target:
-          api_version: "{{ item.api_version }}"
-          kind: "{{ item.kind }}"
-          namespace: "{{ item.namespace | default(omit) }}"
-          name: "{{ item.name }}"
-      loop:
-        - api_version: osac.openshift.io/v1alpha1
-          kind: ClusterOrder
-          namespace: "{{ lookup('env', 'POD_NAMESPACE') }}"
-          name: "{{ cluster_order.metadata.name }}"
-        - api_version: v1
-          kind: Namespace
-          name: "{{ cluster_working_namespace }}"
+    # Everything after the lock is wrapped so a failure RELEASES it. Upstream never
+    # releases explicitly -- the Lease carries an ownerReference to the AWX job pod
+    # and relies on Kubernetes garbage collection when that pod dies. That only
+    # works when AWX runs on the same cluster the Lease lives on. Run AWX anywhere
+    # else (this lab: AWX on one machine, hub on another, with a long-lived owner
+    # object standing in for the job pod) and GC never fires, so every failed job
+    # leaves a permanent lock and the next attempt dies on a server-side-apply
+    # conflict with the previous holder. The rescue makes failures self-healing in
+    # both deployments: where GC works this is merely redundant, where it does not
+    # this is the only thing that releases the lock.
+    - name: Provision under the cluster lock
+      block:
+        - name: Add infrastructure finalizer
+          ansible.builtin.include_role:
+            name: osac.service.finalizer
+          vars:
+            finalizer_state: present
+            finalizer_name: "{{ cluster_order_infrastructure_finalizer }}"
+            finalizer_target:
+              api_version: "{{ item.api_version }}"
+              kind: "{{ item.kind }}"
+              namespace: "{{ item.namespace | default(omit) }}"
+              name: "{{ item.name }}"
+          loop:
+            - api_version: osac.openshift.io/v1alpha1
+              kind: ClusterOrder
+              namespace: "{{ lookup('env', 'POD_NAMESPACE') }}"
+              name: "{{ cluster_order.metadata.name }}"
+            - api_version: v1
+              kind: Namespace
+              name: "{{ cluster_working_namespace }}"
 
-    - name: Display cluster order information
-      ansible.builtin.debug:
-        msg:
-          - "Cluster order: {{ cluster_order.metadata.name }}"
-          - "Cluster working namespace: {{ cluster_working_namespace }}"
-          - "Template ID: {{ template_id }}"
+        - name: Display cluster order information
+          ansible.builtin.debug:
+            msg:
+              - "Cluster order: {{ cluster_order.metadata.name }}"
+              - "Cluster working namespace: {{ cluster_working_namespace }}"
+              - "Template ID: {{ template_id }}"
 
-    - name: Call the selected template
-      ansible.builtin.include_role:
-        name: "{{ template_id }}"
-        tasks_from: "install"
+        - name: Call the selected template
+          ansible.builtin.include_role:
+            name: "{{ template_id }}"
+            tasks_from: "install"
+
+      rescue:
+        - name: Release cluster lock after failure
+          ansible.builtin.include_role:
+            name: osac.service.lease
+          vars:
+            lease_state: absent
+            lease_holder: "{{ cluster_order_holder_id }}"
+            lease_name: "cluster-{{ cluster_order_name }}-lock"
+
+        # Re-raise: the rescue exists to release the lock, not to swallow the
+        # failure -- AWX and the operator must still see this job as failed.
+        - name: Re-raise the provisioning failure
+          ansible.builtin.fail:
+            msg: >-
+              Provisioning failed; the cluster lock was released so the next
+              attempt is not blocked. See the failed task above for the cause.
