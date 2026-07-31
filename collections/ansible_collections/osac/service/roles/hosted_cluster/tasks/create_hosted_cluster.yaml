@@ -9,7 +9,28 @@
         namespace: "{{ hosted_cluster_namespace }}"
         labels: "{{ hosted_cluster_default_cluster_order_label }}"
       data:
-        .dockerconfigjson: "{{ hosted_cluster_settings.pull_secret | b64encode }}"
+        # pull_secret reaches here as a dict, not the string it started as. Ansible
+        # templating converts any value that parses as JSON into a Python object on
+        # its way through set_fact -- cluster_settings does
+        #   cluster_settings_pull_secret: "{{ ...data.pull_secret | b64decode }}"
+        # and a dockerconfigjson document is, by definition, valid JSON. b64encode
+        # then serialises the dict with repr(), producing single quotes, and the API
+        # server rejects it:
+        #
+        #   Secret "pullsecret-cluster-<name>" is invalid: data[.dockerconfigjson]:
+        #     invalid character '\' looking for beginning of object key string
+        #
+        # This affects every pull secret, not just unusual ones -- confirmed the
+        # conversion is json.loads rather than literal_eval (a null round-tripped to
+        # Python None), and ANSIBLE_JINJA2_NATIVE=False does not change it.
+        #
+        # Re-serialise with to_json when the conversion has happened, and pass the
+        # value through untouched when it has not, because to_json on a str would
+        # double-encode it into a quoted JSON string.
+        .dockerconfigjson: >-
+          {{ (hosted_cluster_settings.pull_secret | to_json
+          if hosted_cluster_settings.pull_secret is mapping
+          else hosted_cluster_settings.pull_secret) | b64encode }}
       type: kubernetes.io/dockerconfigjson
   no_log: true
 
