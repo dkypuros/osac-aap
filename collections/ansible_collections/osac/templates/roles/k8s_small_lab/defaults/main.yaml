@@ -1,0 +1,10 @@
+---
+# Lab-owned HyperShift-free template: a lightweight Kubernetes (k3s) cluster on
+# the discovery-booted hosts. Every default here mirrors what was proven BY HAND
+# in the Stage-1 test (spoke-0/spoke-1 Ready, verified externally) before this
+# role existed -- the role automates that transcript, nothing more.
+k8s_small_lab_jump_host: "100.81.250.46"          # Sheldon: guests live on its libvirt NAT
+k8s_small_lab_jump_user: "student"
+k8s_small_lab_guest_user: "core"                  # live RHCOS discovery image user
+k8s_small_lab_ssh_secret_name: "osac-lab-ssh-key" # hub Secret holding the one lab key (both hops)
+k8s_small_lab_ssh_secret_namespace: "osac"

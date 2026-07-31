@@ -1,0 +1,261 @@
+---
+# k8s_small_lab install: k3s over SSH onto the hosts this order leased.
+#
+# Flow: leased BareMetalInstances -> matching Agents (same host_uuid annotation
+# contract as osac.steps.cluster_infra) -> inventory IPs -> SSH via the Sheldon
+# jump host -> k3s server on host 0, agent on host 1 -> kubeconfig published as
+# a Secret in the working namespace -> HostedCluster status written by THIS ROLE.
+#
+# That last step deserves honesty: upstream, ACM/HyperShift reconciles the
+# HostedCluster and the osac-operator merely mirrors its conditions. This lab
+# has no ACM, so the role sets Available itself AFTER verifying the cluster
+# answers. The signal is simulated; the cluster it describes is real.
+
+- name: Get BareMetalInstances leased to this order
+  kubernetes.core.k8s_info:
+    api_version: osac.openshift.io/v1alpha1
+    kind: BareMetalInstance
+    namespace: "{{ lookup('env', 'POD_NAMESPACE') }}"
+    label_selectors:
+      - "{{ cluster_order_label }}={{ cluster_order.metadata.name }}"
+  register: k8s_small_lab_bmis
+
+- name: Fall back to unlabelled instances matching the order name
+  when: (k8s_small_lab_bmis.resources | length) == 0
+  kubernetes.core.k8s_info:
+    api_version: osac.openshift.io/v1alpha1
+    kind: BareMetalInstance
+    namespace: "{{ lookup('env', 'POD_NAMESPACE') }}"
+  register: k8s_small_lab_bmis_all
+
+- name: Select this order's instances
+  ansible.builtin.set_fact:
+    k8s_small_lab_instances: >-
+      {{ k8s_small_lab_bmis.resources
+         if (k8s_small_lab_bmis.resources | length) > 0
+         else (k8s_small_lab_bmis_all.resources
+               | selectattr('metadata.name', 'search', cluster_order.metadata.name)
+               | list) }}
+
+- name: Fail if the order has no leased hosts
+  ansible.builtin.fail:
+    msg: "No BareMetalInstances found for order {{ cluster_order.metadata.name }}"
+  when: (k8s_small_lab_instances | length) == 0
+
+- name: Collect leased host IDs
+  ansible.builtin.set_fact:
+    k8s_small_lab_host_ids: "{{ k8s_small_lab_instances | map(attribute='spec.externalHostID') | list }}"
+
+- name: Get Agents in hardware-inventory
+  kubernetes.core.k8s_info:
+    api_version: agent-install.openshift.io/v1beta1
+    kind: Agent
+    namespace: hardware-inventory
+  register: k8s_small_lab_agents_all
+
+- name: Match agents to leased hosts (host_uuid annotation contract)
+  ansible.builtin.set_fact:
+    k8s_small_lab_agents: >-
+      {{ k8s_small_lab_agents_all.resources
+         | selectattr('metadata.annotations', 'defined')
+         | selectattr('metadata.annotations["osac.openshift.io/host_uuid"]', 'defined')
+         | selectattr('metadata.annotations["osac.openshift.io/host_uuid"]', 'in', k8s_small_lab_host_ids)
+         | list }}
+
+- name: Fail if agents do not cover the leased hosts
+  ansible.builtin.fail:
+    msg: "Resolved {{ k8s_small_lab_agents | length }} Agents for {{ k8s_small_lab_host_ids | length }} leased hosts."
+  when: (k8s_small_lab_agents | length) != (k8s_small_lab_host_ids | length)
+
+- name: Extract node IPs from agent inventories
+  ansible.builtin.set_fact:
+    k8s_small_lab_ips: >-
+      {{ k8s_small_lab_agents
+         | map(attribute='status.inventory.interfaces') | map('first')
+         | map(attribute='ipV4Addresses') | map('first')
+         | map('regex_replace', '/\d+$', '') | list | sort }}
+
+- name: Fetch the lab SSH key from the hub
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ k8s_small_lab_ssh_secret_name }}"
+    namespace: "{{ k8s_small_lab_ssh_secret_namespace }}"
+  register: k8s_small_lab_key_secret
+  no_log: true
+
+- name: Write SSH key for this run
+  ansible.builtin.copy:
+    content: "{{ k8s_small_lab_key_secret.resources[0].data.id_ed25519 | b64decode }}"
+    dest: /tmp/k8s-small-lab-key
+    mode: "0600"
+  no_log: true
+
+- name: Set SSH command prefix (one key, jump through Sheldon)
+  ansible.builtin.set_fact:
+    k8s_small_lab_ssh: >-
+      ssh -i /tmp/k8s-small-lab-key
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+      -o ProxyJump={{ k8s_small_lab_jump_user }}@{{ k8s_small_lab_jump_host }}
+    k8s_small_lab_server_ip: "{{ k8s_small_lab_ips[0] }}"
+    k8s_small_lab_worker_ips: "{{ k8s_small_lab_ips[1:] }}"
+
+# --- k3s server -------------------------------------------------------------
+# Idempotent: a re-run (or a Stage-1 hand-install) is detected and reused.
+# The three RHCOS/live-ISO gotchas from Stage 1, encoded:
+#   1. INSTALL_K3S_SKIP_SELINUX_RPM must come AFTER sudo (sudo strips env);
+#      rpm-ostree cannot take the k3s-selinux rpm on a live system.
+#   2. The binary lands with var_t context; systemd refuses to exec it:
+#      chcon -t bin_t, and setenforce 0 -- these hosts are ephemeral RAM-booted
+#      discovery images, chasing per-domain denials buys nothing.
+#   3. sudo's secure_path lacks /usr/local/bin: full path always.
+- name: Install k3s server
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - >-
+        {{ k8s_small_lab_ssh }} {{ k8s_small_lab_guest_user }}@{{ k8s_small_lab_server_ip }}
+        'sudo systemctl is-active k3s >/dev/null 2>&1 && echo already-running && exit 0;
+         curl -sfL https://get.k3s.io -o /tmp/k3s.sh &&
+         sudo INSTALL_K3S_SKIP_SELINUX_RPM=true INSTALL_K3S_SELINUX_WARN=true
+         sh /tmp/k3s.sh server --disable traefik --write-kubeconfig-mode 644 || true;
+         sudo chcon -t bin_t /usr/local/bin/k3s && sudo setenforce 0 || true;
+         sudo systemctl restart k3s && sleep 10 && sudo systemctl is-active k3s'
+  register: k8s_small_lab_server
+  changed_when: "'already-running' not in k8s_small_lab_server.stdout"
+  retries: 2
+  delay: 15
+  until: k8s_small_lab_server.rc == 0
+
+- name: Read the node join token
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - "{{ k8s_small_lab_ssh }} {{ k8s_small_lab_guest_user }}@{{ k8s_small_lab_server_ip }} 'sudo cat /var/lib/rancher/k3s/server/node-token'"
+  register: k8s_small_lab_token
+  no_log: true
+
+- name: Join workers
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - >-
+        {{ k8s_small_lab_ssh }} {{ k8s_small_lab_guest_user }}@{{ item }}
+        'sudo systemctl is-active k3s-agent >/dev/null 2>&1 && echo already-running && exit 0;
+         curl -sfL https://get.k3s.io -o /tmp/k3s.sh &&
+         sudo INSTALL_K3S_SKIP_SELINUX_RPM=true INSTALL_K3S_SELINUX_WARN=true
+         K3S_URL=https://{{ k8s_small_lab_server_ip }}:6443
+         K3S_TOKEN={{ k8s_small_lab_token.stdout | trim }}
+         sh /tmp/k3s.sh || true;
+         sudo chcon -t bin_t /usr/local/bin/k3s && sudo setenforce 0 || true;
+         sudo systemctl restart k3s-agent && sleep 5 && sudo systemctl is-active k3s-agent'
+  loop: "{{ k8s_small_lab_worker_ips }}"
+  register: k8s_small_lab_join
+  changed_when: true
+  retries: 2
+  delay: 15
+  until: k8s_small_lab_join.rc == 0
+
+# --- verify BEFORE claiming anything ---------------------------------------
+- name: Verify all nodes are Ready
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - >-
+        {{ k8s_small_lab_ssh }} {{ k8s_small_lab_guest_user }}@{{ k8s_small_lab_server_ip }}
+        'sudo /usr/local/bin/k3s kubectl get nodes --no-headers'
+  register: k8s_small_lab_nodes
+  retries: 6
+  delay: 15
+  until: >-
+    (k8s_small_lab_nodes.stdout_lines | length) == (k8s_small_lab_ips | length)
+    and (k8s_small_lab_nodes.stdout_lines | reject('search', ' Ready') | list | length) == 0
+
+- name: Fetch kubeconfig
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - "{{ k8s_small_lab_ssh }} {{ k8s_small_lab_guest_user }}@{{ k8s_small_lab_server_ip }} 'sudo cat /etc/rancher/k3s/k3s.yaml'"
+  register: k8s_small_lab_kubeconfig_raw
+  no_log: true
+
+- name: Publish kubeconfig Secret in the working namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "kubeconfig-cluster-{{ cluster_order.metadata.name }}"
+        namespace: "{{ cluster_working_namespace }}"
+        labels: "{{ {cluster_order_label: cluster_order.metadata.name} }}"
+      stringData:
+        kubeconfig: "{{ k8s_small_lab_kubeconfig_raw.stdout | replace('127.0.0.1', k8s_small_lab_server_ip) }}"
+  no_log: true
+
+# --- readiness signal (simulated where ACM would be) ------------------------
+- name: Create HostedCluster shell for operator visibility
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: hypershift.openshift.io/v1beta1
+      kind: HostedCluster
+      metadata:
+        name: "{{ cluster_order.metadata.name }}"
+        namespace: "{{ cluster_working_namespace }}"
+        labels: "{{ {cluster_order_label: cluster_order.metadata.name} }}"
+        annotations:
+          osac.kypuros-lab/flavor: k8s-small-lab
+          osac.kypuros-lab/note: >-
+            Status conditions on this object are maintained by the
+            k8s_small_lab template role after verifying the k3s cluster
+            answers -- there is no ACM/HyperShift here to do it. The cluster
+            behind it is real; this object is bookkeeping for the
+            osac-operator's readiness mirror.
+      spec:
+        release:
+          image: "k3s/{{ k8s_small_lab_nodes.stdout_lines[0].split()[-1] | default('v1.36') }}"
+        pullSecret: {name: "unused"}
+        sshKey: {name: "unused"}
+        clusterID: "{{ cluster_order.metadata.uid }}"
+        platform: {type: "None"}
+        dns: {baseDomain: "lab.internal"}
+        services: []
+        etcd: {managementType: "Unmanaged", unmanaged: {endpoints: ["https://unused:2379"], tls: {clientSecret: {name: "unused"}}}}
+        networking:
+          clusterNetwork: [{cidr: "10.42.0.0/16"}]
+          serviceNetwork: [{cidr: "10.43.0.0/16"}]
+          networkType: "Other"
+
+- name: Mark the HostedCluster Available (verified above, see annotation)
+  kubernetes.core.k8s_json_patch:
+    api_version: hypershift.openshift.io/v1beta1
+    kind: HostedCluster
+    name: "{{ cluster_order.metadata.name }}"
+    namespace: "{{ cluster_working_namespace }}"
+    patch:
+      - op: add
+        path: /status
+        value:
+          controlPlaneEndpoint:
+            host: "{{ k8s_small_lab_server_ip }}"
+            port: 6443
+          conditions:
+            - type: Available
+              status: "True"
+              reason: AsExpected
+              message: "k3s cluster verified: all nodes Ready, apiserver answering"
+              # gather_facts is false in the create playbook, so no ansible_date_time
+              lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "Cluster nodes: {{ k8s_small_lab_nodes.stdout_lines }}"
+      - "API: https://{{ k8s_small_lab_server_ip }}:6443"
+      - "Kubeconfig: secret kubeconfig-cluster-{{ cluster_order.metadata.name }} in {{ cluster_working_namespace }}"

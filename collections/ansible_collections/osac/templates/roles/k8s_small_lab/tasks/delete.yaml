@@ -1,0 +1,19 @@
+---
+# Deprovision: the hosts are ephemeral RAM-booted discovery images, so there is
+# no OS state to clean -- deleting the bookkeeping objects is the whole job.
+# (A reboot of the hosts wipes k3s entirely; NICo owns real host lifecycle.)
+- name: Delete HostedCluster shell
+  kubernetes.core.k8s:
+    state: absent
+    api_version: hypershift.openshift.io/v1beta1
+    kind: HostedCluster
+    name: "{{ cluster_order.metadata.name }}"
+    namespace: "{{ cluster_working_namespace }}"
+
+- name: Delete kubeconfig Secret
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: "kubeconfig-cluster-{{ cluster_order.metadata.name }}"
+    namespace: "{{ cluster_working_namespace }}"
