@@ -16,8 +16,13 @@
     - "{{ external_access_name }}-ingress"
 
 - name: Delete dns records
-  when: >-
-    external_access_base_domain in external_access_supported_base_domains | default([])
+  # Same fabric gate as the floating IPs above: cloud DNS (Route 53 for the
+  # MOC's box.massopen.cloud) exists only in the ESI world. A manual-fabric lab
+  # has neither the zone nor AWS credentials, and this task's no_log hides the
+  # real error, so it must not run at all there.
+  when:
+    - (lookup('env', 'OSAC_NETWORK_CLASS') | default('esi', true)) == 'esi'
+    - external_access_base_domain in external_access_supported_base_domains | default([])
   ansible.builtin.include_role:
     name: dns.api.dns
     tasks_from: delete
