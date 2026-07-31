@@ -6,8 +6,14 @@
     manage_agents_cluster_order_name: "{{ cluster_infra_name }}"
 
 - name: Delete cluster network
+  when: cluster_infra_network_class == 'esi'
   ansible.builtin.include_role:
     name: osac.esi.network
   vars:
     network_suffix: "{{ cluster_infra_name }}"
     network_state: absent
+
+- name: Cluster network deletion is external (network class not esi)
+  when: cluster_infra_network_class != 'esi'
+  ansible.builtin.debug:
+    msg: Skipping ESI network deletion -- fabric is managed outside this playbook.
