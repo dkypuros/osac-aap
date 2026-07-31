@@ -36,7 +36,13 @@
   loop_control:
     label: "Detach agent {{ agent.metadata.name }}"
     loop_var: agent
-  when: not (manage_agents_skip_network_detach | default(false))
+  # Fabric gate (same OSAC_NETWORK_CLASS convention as cluster_infra /
+  # external_access): "moving to the idle network" shells out to the openstack
+  # ESI CLI, which neither exists nor has a cloud to talk to in a manual-fabric
+  # lab -- and a failed detach wedges deletion, pinning the hosts.
+  when:
+    - not (manage_agents_skip_network_detach | default(false))
+    - (lookup('env', 'OSAC_NETWORK_CLASS') | default('esi', true)) == 'esi'
 
 - name: Determine which agents have cluster_order_label
   ansible.builtin.set_fact:
