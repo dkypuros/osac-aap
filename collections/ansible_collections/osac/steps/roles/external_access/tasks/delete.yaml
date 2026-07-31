@@ -1,4 +1,11 @@
+# Fabric gate, same convention as cluster_infra (OSAC_NETWORK_CLASS env,
+# default esi so upstream is unaffected): floating IPs are an OpenStack/ESI
+# concept. In a lab with no OpenStack this loop dies in keystoneauth inside
+# osac.esi.floating_ip and wedges DELETION -- an order stuck in Deleting pins
+# its BareMetalInstances and therefore the hosts, which is strictly worse than
+# a failed create.
 - name: Destroy floating ips
+  when: (lookup('env', 'OSAC_NETWORK_CLASS') | default('esi', true)) == 'esi'
   ansible.builtin.include_role:
     name: osac.esi.floating_ip
     tasks_from: destroy_floating_ip.yaml
