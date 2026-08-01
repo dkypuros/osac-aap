@@ -242,7 +242,8 @@
         platform: {type: "None"}
         dns: {baseDomain: "lab.internal"}
         services: []
-        etcd: {managementType: "Unmanaged", unmanaged: {endpoints: ["https://unused:2379"], tls: {clientSecret: {name: "unused"}}}}
+        # real 4.17 CRD validation: endpoint is singular here
+        etcd: {managementType: "Unmanaged", unmanaged: {endpoint: "https://unused:2379", tls: {clientSecret: {name: "unused"}}}}
         networking:
           clusterNetwork: [{cidr: "10.42.0.0/16"}]
           serviceNetwork: [{cidr: "10.43.0.0/16"}]
