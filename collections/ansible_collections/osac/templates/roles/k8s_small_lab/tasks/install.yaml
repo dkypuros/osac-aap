@@ -62,21 +62,15 @@
   ansible.builtin.set_fact:
     k8s_small_lab_host_ids: "{{ k8s_small_lab_instances | map(attribute='spec.externalHostID') | list }}"
 
-- name: Get Agents in hardware-inventory
-  kubernetes.core.k8s_info:
-    api_version: agent-install.openshift.io/v1beta1
-    kind: Agent
-    namespace: hardware-inventory
-  register: k8s_small_lab_agents_all
-
-- name: Match agents to leased hosts (host_uuid annotation contract)
+# cluster_infra (included above) already resolved agents for the leased hosts
+# and labelled them -- agents_to_attach is its output fact and survives in play
+# scope. The first version of this role re-derived the match with selectattr on
+# a bracket-subscripted annotation path, which Jinja's selectattr cannot
+# traverse: every agent silently filtered out, "Resolved 0 Agents for 2 leased
+# hosts" even though cluster_infra had just matched both. Reuse, don't rederive.
+- name: Use the agents cluster_infra resolved
   ansible.builtin.set_fact:
-    k8s_small_lab_agents: >-
-      {{ k8s_small_lab_agents_all.resources
-         | selectattr('metadata.annotations', 'defined')
-         | selectattr('metadata.annotations["osac.openshift.io/host_uuid"]', 'defined')
-         | selectattr('metadata.annotations["osac.openshift.io/host_uuid"]', 'in', k8s_small_lab_host_ids)
-         | list }}
+    k8s_small_lab_agents: "{{ agents_to_attach }}"
 
 - name: Fail if agents do not cover the leased hosts
   ansible.builtin.fail:
