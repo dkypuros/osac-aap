@@ -103,10 +103,16 @@
 
 - name: Set SSH command prefix (one key, jump through Sheldon)
   ansible.builtin.set_fact:
+    # ProxyJump does NOT inherit -o options for the jump hop, so the first hop
+    # dies on host key verification in a non-interactive EE ("Host key
+    # verification failed" on 100.81.250.46). An explicit ProxyCommand carries
+    # the same key and no-verify options on both hops.
     k8s_small_lab_ssh: >-
       ssh -i /tmp/k8s-small-lab-key
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
-      -o ProxyJump={{ k8s_small_lab_jump_user }}@{{ k8s_small_lab_jump_host }}
+      -o ProxyCommand='ssh -i /tmp/k8s-small-lab-key -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p
+      {{ k8s_small_lab_jump_user }}@{{ k8s_small_lab_jump_host }}'
     k8s_small_lab_server_ip: "{{ k8s_small_lab_ips[0] }}"
     k8s_small_lab_worker_ips: "{{ k8s_small_lab_ips[1:] }}"
 
