@@ -11,6 +11,22 @@
 # has no ACM, so the role sets Available itself AFTER verifying the cluster
 # answers. The signal is simulated; the cluster it describes is real.
 
+# Allocation first: the OCP templates get their BareMetalPool from
+# osac.steps.cluster_infra, and this role initially skipped that stage --
+# first live order failed with "No BareMetalInstances found" because nothing
+# had created a pool. Reuse the same step the OCP flow uses (it is already
+# fabric-gated: with OSAC_NETWORK_CLASS=manual the ESI network pieces no-op,
+# while pool creation, allocation wait and agent labelling all run).
+- name: Allocate bare-metal hosts for this order
+  ansible.builtin.include_role:
+    name: osac.steps.cluster_infra
+    tasks_from: create
+  vars:
+    cluster_infra_state: present
+    cluster_infra_name: "{{ cluster_order.metadata.name }}"
+    cluster_infra_namespace: "{{ cluster_working_namespace }}"
+    cluster_infra_node_requests: "{{ cluster_order.spec.nodeRequests | unique(attribute='resourceClass') }}"
+
 - name: Get BareMetalInstances leased to this order
   kubernetes.core.k8s_info:
     api_version: osac.openshift.io/v1alpha1
