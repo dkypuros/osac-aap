@@ -240,7 +240,17 @@
         sshKey: {name: "unused"}
         clusterID: "{{ cluster_order.metadata.uid }}"
         platform: {type: "None"}
-        dns: {baseDomain: "lab.internal"}
+        # The operator ALWAYS renders a console URL from this value
+        # (feedback_controller.calculateConsoleURL: "https://console-openshift-
+        # console.apps.{name}.{baseDomain}") -- there is no way to make it emit
+        # nothing while a HostedCluster exists, and we need the object for the
+        # API URL. A k3s cluster has no OpenShift web console at all, so the
+        # honest move is to make the fabrication self-refuting: .invalid is the
+        # RFC 2606 reserved TLD that is GUARANTEED never to resolve, and the
+        # label says why. The UI then reads
+        #   https://console-openshift-console.apps.<order>.k3s-no-console.invalid
+        # which tells the truth instead of dangling a link that looks broken.
+        dns: {baseDomain: "k3s-no-console.invalid"}
         services: []
         # real 4.17 CRD validation: endpoint is singular here
         etcd: {managementType: "Unmanaged", unmanaged: {endpoint: "https://unused:2379", tls: {clientSecret: {name: "unused"}}}}
@@ -250,29 +260,65 @@
           networkType: "Other"
 
 - name: Mark the HostedCluster Available (verified above, see annotation)
-  kubernetes.core.k8s_json_patch:
+  # HostedCluster declares a status SUBRESOURCE ({"status":{}} in the CRD), so a
+  # patch aimed at the main resource is silently discarded -- the module still
+  # reports "ok" and nothing is written. That is exactly how this shipped a green
+  # UI badge over an empty status: API URL blank, ControlPlaneAvailable False.
+  # kubernetes.core has no subresource parameter, so go at /status directly with
+  # the same credentials the container group already injects.
+  ansible.builtin.uri:
+    url: >-
+      {{ lookup('env', 'K8S_AUTH_HOST') }}/apis/hypershift.openshift.io/v1beta1/namespaces/{{ cluster_working_namespace }}/hostedclusters/{{ cluster_order.metadata.name }}/status
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ lookup('env', 'K8S_AUTH_API_KEY') }}"
+      Content-Type: application/merge-patch+json
+    body_format: json
+    body:
+      status:
+        controlPlaneEndpoint:
+          host: "{{ k8s_small_lab_server_ip }}"
+          port: 6443
+        conditions:
+          - type: Available
+            status: "True"
+            reason: AsExpected
+            message: "k3s cluster verified: all nodes Ready, apiserver answering"
+            lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+    validate_certs: false
+    status_code: [200, 201]
+  no_log: true
+
+# Trust nothing that only said "ok": read the object back and fail the job if the
+# condition and endpoint are not actually there. A green order on an empty status
+# is worse than a failed one -- it is a UI that lies.
+- name: Verify the status write actually landed
+  kubernetes.core.k8s_info:
     api_version: hypershift.openshift.io/v1beta1
     kind: HostedCluster
     name: "{{ cluster_order.metadata.name }}"
     namespace: "{{ cluster_working_namespace }}"
-    patch:
-      - op: add
-        path: /status
-        value:
-          controlPlaneEndpoint:
-            host: "{{ k8s_small_lab_server_ip }}"
-            port: 6443
-          conditions:
-            - type: Available
-              status: "True"
-              reason: AsExpected
-              message: "k3s cluster verified: all nodes Ready, apiserver answering"
-              # gather_facts is false in the create playbook, so no ansible_date_time
-              lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+  register: k8s_small_lab_hc_readback
+  retries: 5
+  delay: 3
+  until: >-
+    (k8s_small_lab_hc_readback.resources | default([]) | length) == 1
+    and (k8s_small_lab_hc_readback.resources[0].status | default({})).controlPlaneEndpoint is defined
+    and ((k8s_small_lab_hc_readback.resources[0].status.conditions | default([]))
+         | selectattr('type', 'equalto', 'Available')
+         | selectattr('status', 'equalto', 'True') | list | length) == 1
+
+- name: Fail loudly if the readback is empty
+  ansible.builtin.fail:
+    msg: >-
+      HostedCluster status did not persist (subresource write failed). Refusing to
+      report a cluster READY on an unverified object.
+  when: >-
+    (k8s_small_lab_hc_readback.resources[0].status | default({})).controlPlaneEndpoint is not defined
 
 - name: Report
   ansible.builtin.debug:
     msg:
       - "Cluster nodes: {{ k8s_small_lab_nodes.stdout_lines }}"
-      - "API: https://{{ k8s_small_lab_server_ip }}:6443"
+      - "API: https://{{ k8s_small_lab_server_ip }}:6443 (written to HostedCluster status -> fulfillment apiUrl)"
       - "Kubeconfig: secret kubeconfig-cluster-{{ cluster_order.metadata.name }} in {{ cluster_working_namespace }}"
