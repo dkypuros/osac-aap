@@ -92,6 +92,22 @@
             name: "{{ template_id }}"
             tasks_from: "install"
 
+      # SUCCESS path. Upstream never releases explicitly here either -- same
+      # ownerReference-GC assumption as the failure path, and equally broken when
+      # AWX runs off-hub. Observed: job 343 SUCCEEDED and left
+      # cluster-order-<n>-lock held by its own holder id, so every subsequent run
+      # of that order died on a server-side-apply conflict with a job that had
+      # finished cleanly minutes earlier. The rescue added earlier only covered
+      # failures; a lock leaked by success is just as fatal, and more confusing.
+      always:
+        - name: Release cluster lock when the block leaves, however it leaves
+          ansible.builtin.include_role:
+            name: osac.service.lease
+          vars:
+            lease_state: absent
+            lease_holder: "{{ cluster_order_holder_id }}"
+            lease_name: "cluster-{{ cluster_order_name }}-lock"
+
       rescue:
         - name: Release cluster lock after failure
           ansible.builtin.include_role:
