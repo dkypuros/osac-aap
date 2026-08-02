@@ -287,7 +287,21 @@
             lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
     validate_certs: false
     status_code: [200, 201]
+  # no_log because the Authorization header carries the hub token -- but NOT
+  # silently: the result is captured and the next task re-raises with the status
+  # code and server message only. Censoring the credential is right; censoring
+  # the diagnosis is the upstream habit that cost hours this sprint.
   no_log: true
+  failed_when: false
+  register: k8s_small_lab_status_write
+
+- name: Report the status write outcome without leaking the token
+  ansible.builtin.fail:
+    msg: >-
+      HostedCluster status PATCH failed: HTTP
+      {{ k8s_small_lab_status_write.status | default('none') }} --
+      {{ (k8s_small_lab_status_write.msg | default('no message'))[:300] }}
+  when: k8s_small_lab_status_write.status | default(0) not in [200, 201]
 
 # Trust nothing that only said "ok": read the object back and fail the job if the
 # condition and endpoint are not actually there. A green order on an empty status
