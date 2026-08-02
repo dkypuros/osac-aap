@@ -279,11 +279,33 @@
         controlPlaneEndpoint:
           host: "{{ k8s_small_lab_server_ip }}"
           port: 6443
+        # The operator reads THREE conditions, not one (clusterorder_controller.go):
+        #   ControlPlaneAvailable := Available=True AND Degraded=False
+        #   Ready                 := ClusterVersionSucceeding=True AND Degraded=False
+        # Writing only Available left ControlPlaneAvailable False, so the console's
+        # Conditions table contradicted its own green badge. Each is written only
+        # because the readback above proved the corresponding fact about the real
+        # cluster: every node Ready (Available), none NotReady (not Degraded), and
+        # the k3s version reported by the API server (ClusterVersionSucceeding --
+        # there is no ClusterVersion object in k3s, so the honest analogue is
+        # "the apiserver serves its version and all nodes run it").
         conditions:
           - type: Available
             status: "True"
             reason: AsExpected
             message: "k3s cluster verified: all nodes Ready, apiserver answering"
+            lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+          - type: Degraded
+            status: "False"
+            reason: AsExpected
+            message: "no node reported NotReady during verification"
+            lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+          - type: ClusterVersionSucceeding
+            status: "True"
+            reason: AsExpected
+            message: >-
+              k3s {{ (k8s_small_lab_nodes.stdout_lines[0].split() | last) | default('unknown') }}
+              serving on all nodes
             lastTransitionTime: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
     validate_certs: false
     status_code: [200, 201]
@@ -320,6 +342,12 @@
     and (k8s_small_lab_hc_readback.resources[0].status | default({})).controlPlaneEndpoint is defined
     and ((k8s_small_lab_hc_readback.resources[0].status.conditions | default([]))
          | selectattr('type', 'equalto', 'Available')
+         | selectattr('status', 'equalto', 'True') | list | length) == 1
+    and ((k8s_small_lab_hc_readback.resources[0].status.conditions | default([]))
+         | selectattr('type', 'equalto', 'Degraded')
+         | selectattr('status', 'equalto', 'False') | list | length) == 1
+    and ((k8s_small_lab_hc_readback.resources[0].status.conditions | default([]))
+         | selectattr('type', 'equalto', 'ClusterVersionSucceeding')
          | selectattr('status', 'equalto', 'True') | list | length) == 1
 
 - name: Fail loudly if the readback is empty
